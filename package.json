@@ -1,0 +1,13 @@
+{
+  "name": "cottage-booking-kpi-report",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "report": "node report.mjs"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "nodemailer": "^6.9.14",
+    "pdfkit": "^0.15.0"
+  }
+}
