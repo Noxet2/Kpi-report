@@ -1,28 +1,24 @@
 name: Weekly KPI Report
 
-on:
-  schedule:
-    - cron: "0 7 * * 3"   # Every Wednesday at 07:00 UTC (09:00 Swedish time)
-  workflow_dispatch:        # Allow manual trigger for testing
+  on:
+    schedule:
+      - cron: "0 7 * * 3"
+    workflow_dispatch:
 
-jobs:
-  send-report:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Send KPI report
-        env:
-          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
-          GMAIL_USER: ${{ secrets.GMAIL_USER }}
-          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
-          REPORT_RECIPIENT: ${{ secrets.REPORT_RECIPIENT }}
-        run: node report.mjs
+  jobs:
+    send-report:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+        - uses: actions/setup-node@v4
+          with:
+            node-version: "22"
+        - name: Install dependencies
+          run: npm install
+        - name: Send KPI report
+          env:
+            POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+            GMAIL_USER: ${{ secrets.GMAIL_USER }}
+            GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+            REPORT_RECIPIENT: ${{ secrets.REPORT_RECIPIENT }}
+          run: node report.mjs
