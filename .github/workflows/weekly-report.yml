@@ -1,6 +1,6 @@
 name: Weekly KPI Report
 
-  on:
+  "on":
     schedule:
       - cron: "0 7 * * 3"
     workflow_dispatch:
