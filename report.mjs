@@ -24,151 +24,223 @@ async function query(sql) {
   return res.data.results;
 }
 
+function weekQuery(event, intervalStart, intervalEnd) {
+  return query(`
+    SELECT count()
+    FROM events
+    WHERE event = '${event}'
+      AND timestamp >= now() - INTERVAL ${intervalStart} DAY
+      AND timestamp < now() - INTERVAL ${intervalEnd} DAY
+  `);
+}
+
 async function fetchKPIs() {
-  const [traffic, signups, content, paymentCard, live, bookings] = await Promise.all([
+  // Current week = last 7 days, previous week = 7-14 days ago
+  const [
+    trafficCurr, trafficPrev,
+    signupsCurr, signupsPrev,
+    contentCurr, contentPrev,
+    paymentCurr, paymentPrev,
+    liveCurr,    livePrev,
+    bookingsCurr, bookingsPrev,
+  ] = await Promise.all([
+    // Traffic current
     query(`
       SELECT count() AS pageviews, count(DISTINCT distinct_id) AS unique_visitors
-      FROM events
-      WHERE event = '$pageview'
+      FROM events WHERE event = '$pageview'
         AND timestamp >= now() - INTERVAL 7 DAY
     `),
+    // Traffic previous
     query(`
-      SELECT count()
-      FROM events
-      WHERE event = 'server_platform_signup_success'
-        AND timestamp >= now() - INTERVAL 7 DAY
+      SELECT count() AS pageviews, count(DISTINCT distinct_id) AS unique_visitors
+      FROM events WHERE event = '$pageview'
+        AND timestamp >= now() - INTERVAL 14 DAY
+        AND timestamp < now() - INTERVAL 7 DAY
     `),
-    query(`
-      SELECT count()
-      FROM events
-      WHERE event = 'cottage_created'
-        AND timestamp >= now() - INTERVAL 7 DAY
-    `),
-    query(`
-      SELECT count()
-      FROM events
-      WHERE event = 'admin_billing_payment_method_added_success'
-        AND timestamp >= now() - INTERVAL 7 DAY
-    `),
-    query(`
-      SELECT count()
-      FROM events
-      WHERE event = 'server_cottage_live_status_changed'
-        AND timestamp >= now() - INTERVAL 7 DAY
-    `),
-    query(`
-      SELECT count()
-      FROM events
-      WHERE event = 'booking_payment_success'
-        AND timestamp >= now() - INTERVAL 7 DAY
-    `),
+    weekQuery("server_platform_signup_success", 7,  0),
+    weekQuery("server_platform_signup_success", 14, 7),
+    weekQuery("cottage_created", 7,  0),
+    weekQuery("cottage_created", 14, 7),
+    weekQuery("admin_billing_payment_method_added_success", 7,  0),
+    weekQuery("admin_billing_payment_method_added_success", 14, 7),
+    weekQuery("server_cottage_live_status_changed", 7,  0),
+    weekQuery("server_cottage_live_status_changed", 14, 7),
+    weekQuery("booking_payment_success", 7,  0),
+    weekQuery("booking_payment_success", 14, 7),
   ]);
 
+  const curr = {
+    pageviews:       Number(trafficCurr[0]?.[0]  ?? 0),
+    uniqueVisitors:  Number(trafficCurr[0]?.[1]  ?? 0),
+    registrations:   Number(signupsCurr[0]?.[0]  ?? 0),
+    contentCreated:  Number(contentCurr[0]?.[0]  ?? 0),
+    paymentCardAdded:Number(paymentCurr[0]?.[0]  ?? 0),
+    wentLive:        Number(liveCurr[0]?.[0]     ?? 0),
+    bookings:        Number(bookingsCurr[0]?.[0] ?? 0),
+  };
+
+  const prev = {
+    pageviews:       Number(trafficPrev[0]?.[0]  ?? 0),
+    uniqueVisitors:  Number(trafficPrev[0]?.[1]  ?? 0),
+    registrations:   Number(signupsPrev[0]?.[0]  ?? 0),
+    contentCreated:  Number(contentPrev[0]?.[0]  ?? 0),
+    paymentCardAdded:Number(paymentPrev[0]?.[0]  ?? 0),
+    wentLive:        Number(livePrev[0]?.[0]     ?? 0),
+    bookings:        Number(bookingsPrev[0]?.[0] ?? 0),
+  };
+
+  return { curr, prev };
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function formatDate(date) {
+  return date.toLocaleDateString("sv-SE");
+}
+
+function delta(curr, prev) {
+  if (prev === 0) return curr > 0 ? { pct: null, up: true } : { pct: null, up: null };
+  const pct = Math.round(((curr - prev) / prev) * 100);
+  return { pct, up: pct >= 0 };
+}
+
+function trendLabel(curr, prev) {
+  const { pct, up } = delta(curr, prev);
+  if (up === null) return { text: "No data", color: "#9ca3af" };
+  if (pct === null) return { text: up ? "New" : "-", color: "#9ca3af" };
+  const arrow = up ? "+" : "";
   return {
-    pageviews:      Number(traffic[0]?.[0]  ?? 0),
-    uniqueVisitors: Number(traffic[0]?.[1]  ?? 0),
-    registrations:  Number(signups[0]?.[0]  ?? 0),
-    contentCreated: Number(content[0]?.[0]  ?? 0),
-    paymentCardAdded: Number(paymentCard[0]?.[0] ?? 0),
-    wentLive:       Number(live[0]?.[0]     ?? 0),
-    bookings:       Number(bookings[0]?.[0] ?? 0),
+    text: `${arrow}${pct}% vs last week`,
+    color: up ? "#16a34a" : "#dc2626",
   };
 }
 
-// ─── PDF ────────────────────────────────────────────────────────────────────
+// ─── PDF ─────────────────────────────────────────────────────────────────────
 
-function formatDate(date) {
-  return date.toLocaleDateString("sv-SE"); // YYYY-MM-DD
-}
-
-function generatePDF(kpis, filePath) {
+function generatePDF({ curr, prev }, filePath) {
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 50, size: "A4" });
+    const doc = new PDFDocument({ margin: 0, size: "A4" });
     const stream = createWriteStream(filePath);
     doc.pipe(stream);
 
-    const now = new Date();
+    const now     = new Date();
     const weekAgo = new Date(now - 7 * 24 * 60 * 60 * 1000);
-    const periodLabel = `${formatDate(weekAgo)} - ${formatDate(now)}`;
+    const twoWeeksAgo = new Date(now - 14 * 24 * 60 * 60 * 1000);
 
-    const BRAND   = "#1a56db";
-    const DARK    = "#111827";
-    const GRAY    = "#6b7280";
-    const LIGHT   = "#f3f4f6";
-    const WHITE   = "#ffffff";
-    const pageW   = doc.page.width - 100; // usable width
+    const PW   = doc.page.width;
+    const BLUE = "#1a56db";
+    const DARK = "#0f172a";
+    const MID  = "#64748b";
+    const LITE = "#f8fafc";
+    const LINE = "#e2e8f0";
+    const GRN  = "#16a34a";
+    const RED  = "#dc2626";
+    const WHITE= "#ffffff";
+    const L    = 48;  // left margin
+    const R    = PW - 48; // right edge
+    const CW   = R - L;   // content width
 
-    // Header bar
-    doc.rect(0, 0, doc.page.width, 90).fill(BRAND);
-    doc.fillColor(WHITE)
-       .fontSize(24).font("Helvetica-Bold")
-       .text("Cottage-Booking.com", 50, 22);
-    doc.fontSize(11).font("Helvetica")
-       .text(`Weekly KPI Report  |  ${periodLabel}`, 50, 54);
+    // ── Header ──────────────────────────────────────────────────────────────
+    doc.rect(0, 0, PW, 100).fill(BLUE);
+    doc.rect(0, 100, PW, 4).fill("#1e40af");
 
-    doc.moveDown(3);
+    doc.fillColor(WHITE).font("Helvetica-Bold").fontSize(22)
+       .text("Cottage-Booking.com", L, 26);
+    doc.font("Helvetica").fontSize(11).fillColor("#bfdbfe")
+       .text(`Weekly KPI Report  \u2022  ${formatDate(weekAgo)} \u2013 ${formatDate(now)}`, L, 56);
+    doc.fontSize(9).fillColor("#93c5fd")
+       .text(`Previous week: ${formatDate(twoWeeksAgo)} \u2013 ${formatDate(weekAgo)}`, L, 76);
 
-    // Section title helper
-    const sectionTitle = (title) => {
-      doc.moveDown(0.5);
-      doc.fillColor(BRAND).fontSize(13).font("Helvetica-Bold").text(title);
-      doc.moveDown(0.3);
-      doc.moveTo(50, doc.y).lineTo(50 + pageW, doc.y).strokeColor(BRAND).lineWidth(1).stroke();
-      doc.moveDown(0.5);
+    // ── Column headers ───────────────────────────────────────────────────────
+    const COL = { label: L + 8, curr: 310, prev: 390, trend: 456 };
+    let y = 124;
+
+    doc.rect(L, y, CW, 24).fill("#f1f5f9");
+    doc.font("Helvetica-Bold").fontSize(8).fillColor(MID);
+    doc.text("METRIC",        COL.label, y + 8);
+    doc.text("THIS WEEK",     COL.curr,  y + 8, { width: 70, align: "right" });
+    doc.text("LAST WEEK",     COL.prev,  y + 8, { width: 70, align: "right" });
+    doc.text("CHANGE",        COL.trend, y + 8, { width: CW - (COL.trend - L) - 8, align: "right" });
+    y += 24;
+
+    // ── KPI row helper ───────────────────────────────────────────────────────
+    const ROW_H = 42;
+    let shade = false;
+
+    const kpiRow = (section, label, currVal, prevVal) => {
+      if (section) {
+        // Section divider
+        y += 6;
+        doc.rect(L, y, CW, 20).fill(BLUE);
+        doc.font("Helvetica-Bold").fontSize(8).fillColor(WHITE)
+           .text(section.toUpperCase(), COL.label, y + 6);
+        y += 20;
+        shade = false;
+      }
+
+      if (shade) doc.rect(L, y, CW, ROW_H).fill(LITE);
+      shade = !shade;
+
+      const { text: tText, color: tColor } = trendLabel(currVal, prevVal);
+
+      // Label
+      doc.font("Helvetica").fontSize(11).fillColor(DARK)
+         .text(label, COL.label, y + 14, { width: 200 });
+
+      // Current value (big)
+      doc.font("Helvetica-Bold").fontSize(16).fillColor(BLUE)
+         .text(currVal.toLocaleString(), COL.curr, y + 12, { width: 70, align: "right" });
+
+      // Previous value (small grey)
+      doc.font("Helvetica").fontSize(11).fillColor(MID)
+         .text(prevVal.toLocaleString(), COL.prev, y + 14, { width: 70, align: "right" });
+
+      // Trend
+      doc.font("Helvetica-Bold").fontSize(10).fillColor(tColor)
+         .text(tText, COL.trend, y + 14, { width: CW - (COL.trend - L) - 8, align: "right" });
+
+      // Bottom border
+      doc.moveTo(L, y + ROW_H).lineTo(R, y + ROW_H).strokeColor(LINE).lineWidth(0.5).stroke();
+      y += ROW_H;
     };
 
-    // KPI row helper
-    const kpiRow = (label, value, description, isShaded) => {
-      const rowH = 36;
-      const y = doc.y;
-      if (isShaded) doc.rect(50, y, pageW, rowH).fill(LIGHT);
-      doc.fillColor(DARK).fontSize(11).font("Helvetica-Bold")
-         .text(label, 60, y + 10, { width: 230 });
-      doc.fillColor(BRAND).fontSize(18).font("Helvetica-Bold")
-         .text(String(value), 290, y + 6, { width: 100, align: "right" });
-      doc.fillColor(GRAY).fontSize(9).font("Helvetica")
-         .text(description, 400, y + 12, { width: pageW - 355 });
-      doc.y = y + rowH + 4;
-    };
+    // ── Rows ─────────────────────────────────────────────────────────────────
+    kpiRow("Website Traffic", "Page Views",          curr.pageviews,       prev.pageviews);
+    kpiRow(null,              "Unique Visitors",      curr.uniqueVisitors,  prev.uniqueVisitors);
+    kpiRow("Registrations",   "New Sign-ups",         curr.registrations,   prev.registrations);
+    kpiRow("Content",         "Cottages Created",     curr.contentCreated,  prev.contentCreated);
+    kpiRow("Activation",      "Payment Card Added",   curr.paymentCardAdded,prev.paymentCardAdded);
+    kpiRow(null,              "Went Live",            curr.wentLive,        prev.wentLive);
+    kpiRow("Bookings",        "Successful Bookings",  curr.bookings,        prev.bookings);
 
-    // ── Traffic ──
-    sectionTitle("Website Traffic");
-    kpiRow("Page Views",       kpis.pageviews,      "Total pages loaded",            false);
-    kpiRow("Unique Visitors",  kpis.uniqueVisitors, "Distinct users on the site",    true);
+    // ── Summary box ──────────────────────────────────────────────────────────
+    y += 16;
+    doc.rect(L, y, CW, 52).fill("#eff6ff").stroke(LINE);
+    doc.font("Helvetica-Bold").fontSize(9).fillColor(BLUE)
+       .text("WEEK SUMMARY", L + 12, y + 10);
 
-    doc.moveDown(0.5);
+    const summaryItems = [
+      { label: "Traffic",       val: curr.pageviews },
+      { label: "Sign-ups",      val: curr.registrations },
+      { label: "New Listings",  val: curr.contentCreated },
+      { label: "Bookings",      val: curr.bookings },
+    ];
+    const colW = CW / summaryItems.length;
+    summaryItems.forEach((item, i) => {
+      const sx = L + i * colW;
+      doc.font("Helvetica-Bold").fontSize(18).fillColor(BLUE)
+         .text(item.val.toLocaleString(), sx, y + 22, { width: colW, align: "center" });
+      doc.font("Helvetica").fontSize(8).fillColor(MID)
+         .text(item.label, sx, y + 41, { width: colW, align: "center" });
+    });
 
-    // ── Registrations ──
-    sectionTitle("Registrations");
-    kpiRow("New Sign-ups",     kpis.registrations,  "Accounts successfully created", false);
-
-    doc.moveDown(0.5);
-
-    // ── Content ──
-    sectionTitle("Content Creation");
-    kpiRow("Cottages Created", kpis.contentCreated, "New property listings added",   false);
-
-    doc.moveDown(0.5);
-
-    // ── Activation ──
-    sectionTitle("Activation");
-    kpiRow("Payment Card Added", kpis.paymentCardAdded, "Hosts who added billing info", false);
-    kpiRow("Went Live",          kpis.wentLive,         "Properties published live",    true);
-
-    doc.moveDown(0.5);
-
-    // ── Bookings ──
-    sectionTitle("Bookings");
-    kpiRow("Successful Bookings", kpis.bookings, "Payments completed by guests",   false);
-
-    // Footer
-    const footerY = doc.page.height - 50;
-    doc.moveTo(50, footerY - 10).lineTo(50 + pageW, footerY - 10)
-       .strokeColor(LIGHT).lineWidth(1).stroke();
-    doc.fillColor(GRAY).fontSize(8).font("Helvetica")
+    // ── Footer ───────────────────────────────────────────────────────────────
+    const footerY = doc.page.height - 36;
+    doc.rect(0, footerY - 4, PW, 40).fill("#f1f5f9");
+    doc.font("Helvetica").fontSize(8).fillColor(MID)
        .text(
-         `Generated automatically on ${formatDate(now)}  |  Data source: PostHog  |  cottage-booking.com`,
-         50, footerY, { width: pageW, align: "center" }
+         `Generated ${formatDate(now)}  \u2022  Data: PostHog  \u2022  cottage-booking.com`,
+         L, footerY + 4, { width: CW, align: "center" }
        );
 
     doc.end();
@@ -179,7 +251,16 @@ function generatePDF(kpis, filePath) {
 
 // ─── Email ───────────────────────────────────────────────────────────────────
 
-async function sendEmail(kpis, pdfPath) {
+function trendBadge(curr, prev) {
+  const { pct, up } = delta(curr, prev);
+  if (up === null) return `<span style="color:#9ca3af;font-size:11px">–</span>`;
+  if (pct === null) return `<span style="color:#16a34a;font-size:11px">New</span>`;
+  const arrow = up ? "&#9650;" : "&#9660;";
+  const color = up ? "#16a34a" : "#dc2626";
+  return `<span style="color:${color};font-size:11px">${arrow} ${Math.abs(pct)}%</span>`;
+}
+
+async function sendEmail({ curr, prev }, pdfPath) {
   const transporter = nodemailer.createTransport({
     service: "gmail",
     auth: { user: GMAIL_USER, pass: GMAIL_PASSWORD },
@@ -188,62 +269,58 @@ async function sendEmail(kpis, pdfPath) {
   const now = new Date();
   const weekAgo = new Date(now - 7 * 24 * 60 * 60 * 1000);
 
+  const row = (label, currVal, prevVal, shade) => `
+    <tr style="background:${shade ? "#f8fafc" : "#fff"}">
+      <td style="padding:12px 16px;font-size:13px;color:#374151">${label}</td>
+      <td style="padding:12px 16px;text-align:right;font-size:18px;font-weight:bold;color:#1a56db">${currVal.toLocaleString()}</td>
+      <td style="padding:12px 16px;text-align:right;font-size:13px;color:#6b7280">${prevVal.toLocaleString()}</td>
+      <td style="padding:12px 16px;text-align:right">${trendBadge(currVal, prevVal)}</td>
+    </tr>`;
+
+  const section = (title) => `
+    <tr style="background:#1a56db">
+      <td colspan="4" style="padding:8px 16px;font-size:11px;font-weight:bold;color:#bfdbfe;letter-spacing:0.05em">${title.toUpperCase()}</td>
+    </tr>`;
+
   const html = `
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-      <div style="background:#1a56db;padding:24px 32px;border-radius:8px 8px 0 0">
-        <h1 style="color:#fff;margin:0;font-size:22px">Cottage-Booking.com</h1>
+    <div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.08)">
+      <div style="background:#1a56db;padding:28px 32px">
+        <h1 style="color:#fff;margin:0;font-size:22px;font-weight:bold">Cottage-Booking.com</h1>
         <p style="color:#bfdbfe;margin:6px 0 0;font-size:13px">
           Weekly KPI Report &mdash; ${weekAgo.toLocaleDateString("sv-SE")} to ${now.toLocaleDateString("sv-SE")}
         </p>
       </div>
-      <div style="background:#f9fafb;padding:24px 32px;border:1px solid #e5e7eb;border-top:none">
-        <table style="width:100%;border-collapse:collapse">
-          <tr style="background:#1a56db;color:#fff">
-            <th style="padding:10px 14px;text-align:left;font-size:12px">KPI</th>
-            <th style="padding:10px 14px;text-align:right;font-size:12px">This Week</th>
+      <div style="padding:24px 32px">
+        <table style="width:100%;border-collapse:collapse;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb">
+          <tr style="background:#f1f5f9">
+            <th style="padding:10px 16px;text-align:left;font-size:11px;color:#64748b;font-weight:600">METRIC</th>
+            <th style="padding:10px 16px;text-align:right;font-size:11px;color:#64748b;font-weight:600">THIS WEEK</th>
+            <th style="padding:10px 16px;text-align:right;font-size:11px;color:#64748b;font-weight:600">LAST WEEK</th>
+            <th style="padding:10px 16px;text-align:right;font-size:11px;color:#64748b;font-weight:600">CHANGE</th>
           </tr>
-          <tr style="background:#fff">
-            <td style="padding:12px 14px;font-size:14px">Page Views</td>
-            <td style="padding:12px 14px;text-align:right;font-size:18px;font-weight:bold;color:#1a56db">${kpis.pageviews}</td>
-          </tr>
-          <tr style="background:#f3f4f6">
-            <td style="padding:12px 14px;font-size:14px">Unique Visitors</td>
-            <td style="padding:12px 14px;text-align:right;font-size:18px;font-weight:bold;color:#1a56db">${kpis.uniqueVisitors}</td>
-          </tr>
-          <tr style="background:#fff">
-            <td style="padding:12px 14px;font-size:14px">New Registrations</td>
-            <td style="padding:12px 14px;text-align:right;font-size:18px;font-weight:bold;color:#1a56db">${kpis.registrations}</td>
-          </tr>
-          <tr style="background:#f3f4f6">
-            <td style="padding:12px 14px;font-size:14px">Cottages Created</td>
-            <td style="padding:12px 14px;text-align:right;font-size:18px;font-weight:bold;color:#1a56db">${kpis.contentCreated}</td>
-          </tr>
-          <tr style="background:#fff">
-            <td style="padding:12px 14px;font-size:14px">Payment Card Added</td>
-            <td style="padding:12px 14px;text-align:right;font-size:18px;font-weight:bold;color:#1a56db">${kpis.paymentCardAdded}</td>
-          </tr>
-          <tr style="background:#f3f4f6">
-            <td style="padding:12px 14px;font-size:14px">Went Live</td>
-            <td style="padding:12px 14px;text-align:right;font-size:18px;font-weight:bold;color:#1a56db">${kpis.wentLive}</td>
-          </tr>
-          <tr style="background:#fff">
-            <td style="padding:12px 14px;font-size:14px;font-weight:bold">Successful Bookings</td>
-            <td style="padding:12px 14px;text-align:right;font-size:22px;font-weight:bold;color:#1a56db">${kpis.bookings}</td>
-          </tr>
+          ${section("Website Traffic")}
+          ${row("Page Views",         curr.pageviews,        prev.pageviews,        false)}
+          ${row("Unique Visitors",    curr.uniqueVisitors,   prev.uniqueVisitors,   true)}
+          ${section("Registrations")}
+          ${row("New Sign-ups",       curr.registrations,    prev.registrations,    false)}
+          ${section("Content")}
+          ${row("Cottages Created",   curr.contentCreated,   prev.contentCreated,   false)}
+          ${section("Activation")}
+          ${row("Payment Card Added", curr.paymentCardAdded, prev.paymentCardAdded, false)}
+          ${row("Went Live",          curr.wentLive,         prev.wentLive,         true)}
+          ${section("Bookings")}
+          ${row("Successful Bookings",curr.bookings,         prev.bookings,         false)}
         </table>
       </div>
-      <div style="background:#e5e7eb;padding:12px 32px;border-radius:0 0 8px 8px;text-align:center">
-        <p style="color:#6b7280;font-size:11px;margin:0">
-          Full report attached as PDF &mdash; cottage-booking.com
-        </p>
+      <div style="background:#f8fafc;padding:16px 32px;border-top:1px solid #e5e7eb;text-align:center">
+        <p style="color:#94a3b8;font-size:11px;margin:0">Full report attached as PDF &mdash; cottage-booking.com</p>
       </div>
-    </div>
-  `;
+    </div>`;
 
   await transporter.sendMail({
     from: `"Cottage-Booking KPI" <${GMAIL_USER}>`,
     to: REPORT_RECIPIENT,
-    subject: `Weekly KPI Report — ${now.toLocaleDateString("sv-SE")}`,
+    subject: `Weekly KPI Report \u2014 ${now.toLocaleDateString("sv-SE")}`,
     html,
     attachments: [{ filename: "kpi-report.pdf", path: pdfPath }],
   });
@@ -258,7 +335,8 @@ const pdfPath = path.join(
 
 console.log("Fetching KPIs from PostHog...");
 const kpis = await fetchKPIs();
-console.log("KPIs:", kpis);
+console.log("This week:", kpis.curr);
+console.log("Last week:", kpis.prev);
 
 console.log("Generating PDF...");
 await generatePDF(kpis, pdfPath);
