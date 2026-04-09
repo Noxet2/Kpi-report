@@ -6,6 +6,8 @@ import { unlink } from "fs/promises";
 import { fileURLToPath } from "url";
 import path from "path";
 import { ChartJSNodeCanvas } from "chartjs-node-canvas";
+import { Chart, registerables } from "chart.js";
+Chart.register(...registerables);
 
 const POSTHOG_BASE = "https://eu.posthog.com";
 const POSTHOG_PROJECT_ID = "86171";
