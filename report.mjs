@@ -5,6 +5,7 @@ import { createWriteStream } from "fs";
 import { unlink } from "fs/promises";
 import { fileURLToPath } from "url";
 import path from "path";
+import { ChartJSNodeCanvas } from "chartjs-node-canvas";
 
 const POSTHOG_BASE = "https://eu.posthog.com";
 const POSTHOG_PROJECT_ID = "86171";
@@ -35,7 +36,6 @@ function weekQuery(event, intervalStart, intervalEnd) {
 }
 
 async function fetchKPIs() {
-  // Current week = last 7 days, previous week = 7-14 days ago
   const [
     trafficCurr, trafficPrev,
     signupsCurr, signupsPrev,
@@ -44,13 +44,11 @@ async function fetchKPIs() {
     liveCurr,    livePrev,
     bookingsCurr, bookingsPrev,
   ] = await Promise.all([
-    // Traffic current
     query(`
       SELECT count() AS pageviews, count(DISTINCT distinct_id) AS unique_visitors
       FROM events WHERE event = '$pageview'
         AND timestamp >= now() - INTERVAL 7 DAY
     `),
-    // Traffic previous
     query(`
       SELECT count() AS pageviews, count(DISTINCT distinct_id) AS unique_visitors
       FROM events WHERE event = '$pageview'
@@ -70,23 +68,23 @@ async function fetchKPIs() {
   ]);
 
   const curr = {
-    pageviews:       Number(trafficCurr[0]?.[0]  ?? 0),
-    uniqueVisitors:  Number(trafficCurr[0]?.[1]  ?? 0),
-    registrations:   Number(signupsCurr[0]?.[0]  ?? 0),
-    contentCreated:  Number(contentCurr[0]?.[0]  ?? 0),
-    paymentCardAdded:Number(paymentCurr[0]?.[0]  ?? 0),
-    wentLive:        Number(liveCurr[0]?.[0]     ?? 0),
-    bookings:        Number(bookingsCurr[0]?.[0] ?? 0),
+    pageviews:        Number(trafficCurr[0]?.[0]  ?? 0),
+    uniqueVisitors:   Number(trafficCurr[0]?.[1]  ?? 0),
+    registrations:    Number(signupsCurr[0]?.[0]  ?? 0),
+    contentCreated:   Number(contentCurr[0]?.[0]  ?? 0),
+    paymentCardAdded: Number(paymentCurr[0]?.[0]  ?? 0),
+    wentLive:         Number(liveCurr[0]?.[0]     ?? 0),
+    bookings:         Number(bookingsCurr[0]?.[0] ?? 0),
   };
 
   const prev = {
-    pageviews:       Number(trafficPrev[0]?.[0]  ?? 0),
-    uniqueVisitors:  Number(trafficPrev[0]?.[1]  ?? 0),
-    registrations:   Number(signupsPrev[0]?.[0]  ?? 0),
-    contentCreated:  Number(contentPrev[0]?.[0]  ?? 0),
-    paymentCardAdded:Number(paymentPrev[0]?.[0]  ?? 0),
-    wentLive:        Number(livePrev[0]?.[0]     ?? 0),
-    bookings:        Number(bookingsPrev[0]?.[0] ?? 0),
+    pageviews:        Number(trafficPrev[0]?.[0]  ?? 0),
+    uniqueVisitors:   Number(trafficPrev[0]?.[1]  ?? 0),
+    registrations:    Number(signupsPrev[0]?.[0]  ?? 0),
+    contentCreated:   Number(contentPrev[0]?.[0]  ?? 0),
+    paymentCardAdded: Number(paymentPrev[0]?.[0]  ?? 0),
+    wentLive:         Number(livePrev[0]?.[0]     ?? 0),
+    bookings:         Number(bookingsPrev[0]?.[0] ?? 0),
   };
 
   return { curr, prev };
@@ -115,35 +113,87 @@ function trendLabel(curr, prev) {
   };
 }
 
+// ─── Charts ──────────────────────────────────────────────────────────────────
+
+const chartCanvas = new ChartJSNodeCanvas({ width: 480, height: 300, backgroundColour: "white" });
+
+function renderChart(label, currVal, prevVal) {
+  return chartCanvas.renderToBuffer({
+    type: "bar",
+    data: {
+      labels: ["This Week", "Last Week"],
+      datasets: [{
+        data: [currVal, prevVal],
+        backgroundColor: ["#1a56db", "#93c5fd"],
+        borderRadius: 6,
+        borderSkipped: false,
+      }],
+    },
+    options: {
+      plugins: {
+        legend: { display: false },
+        title: {
+          display: true,
+          text: label,
+          font: { size: 16, weight: "bold", family: "Arial" },
+          color: "#0f172a",
+          padding: { bottom: 10 },
+        },
+      },
+      scales: {
+        y: {
+          beginAtZero: true,
+          ticks: { font: { size: 11 }, color: "#64748b" },
+          grid: { color: "#e2e8f0" },
+        },
+        x: {
+          ticks: { font: { size: 12 }, color: "#374151" },
+          grid: { display: false },
+        },
+      },
+    },
+  });
+}
+
 // ─── PDF ─────────────────────────────────────────────────────────────────────
 
-function generatePDF({ curr, prev }, filePath) {
+async function generatePDF({ curr, prev }, filePath) {
+  // Pre-render all chart images before opening the PDF stream
+  const chartBuffers = await Promise.all([
+    renderChart("Page Views",          curr.pageviews,        prev.pageviews),
+    renderChart("Unique Visitors",     curr.uniqueVisitors,   prev.uniqueVisitors),
+    renderChart("New Sign-ups",        curr.registrations,    prev.registrations),
+    renderChart("Cottages Created",    curr.contentCreated,   prev.contentCreated),
+    renderChart("Payment Card Added",  curr.paymentCardAdded, prev.paymentCardAdded),
+    renderChart("Went Live",           curr.wentLive,         prev.wentLive),
+    renderChart("Successful Bookings", curr.bookings,         prev.bookings),
+  ]);
+
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ margin: 0, size: "A4" });
     const stream = createWriteStream(filePath);
     doc.pipe(stream);
 
-    const now     = new Date();
-    const weekAgo = new Date(now - 7 * 24 * 60 * 60 * 1000);
+    const now         = new Date();
+    const weekAgo     = new Date(now - 7  * 24 * 60 * 60 * 1000);
     const twoWeeksAgo = new Date(now - 14 * 24 * 60 * 60 * 1000);
 
-    const PW   = doc.page.width;
-    const BLUE = "#1a56db";
-    const DARK = "#0f172a";
-    const MID  = "#64748b";
-    const LITE = "#f8fafc";
-    const LINE = "#e2e8f0";
-    const GRN  = "#16a34a";
-    const RED  = "#dc2626";
-    const WHITE= "#ffffff";
-    const L    = 48;  // left margin
-    const R    = PW - 48; // right edge
-    const CW   = R - L;   // content width
+    const PW    = doc.page.width;
+    const BLUE  = "#1a56db";
+    const DARK  = "#0f172a";
+    const MID   = "#64748b";
+    const LITE  = "#f8fafc";
+    const LINE  = "#e2e8f0";
+    const WHITE = "#ffffff";
+    const L     = 48;
+    const R     = PW - 48;
+    const CW    = R - L;
 
-    // ── Header ──────────────────────────────────────────────────────────────
+    // ── PAGE 1: KPI Table ────────────────────────────────────────────────────
+
+    // Header
     doc.rect(0, 0, PW, 100).fill(BLUE);
     doc.rect(0, 100, PW, 4).fill("#1e40af");
-
     doc.fillColor(WHITE).font("Helvetica-Bold").fontSize(22)
        .text("Cottage-Booking.com", L, 26);
     doc.font("Helvetica").fontSize(11).fillColor("#bfdbfe")
@@ -151,25 +201,23 @@ function generatePDF({ curr, prev }, filePath) {
     doc.fontSize(9).fillColor("#93c5fd")
        .text(`Previous week: ${formatDate(twoWeeksAgo)} \u2013 ${formatDate(weekAgo)}`, L, 76);
 
-    // ── Column headers ───────────────────────────────────────────────────────
+    // Column headers
     const COL = { label: L + 8, curr: 310, prev: 390, trend: 456 };
     let y = 124;
 
     doc.rect(L, y, CW, 24).fill("#f1f5f9");
     doc.font("Helvetica-Bold").fontSize(8).fillColor(MID);
-    doc.text("METRIC",        COL.label, y + 8);
-    doc.text("THIS WEEK",     COL.curr,  y + 8, { width: 70, align: "right" });
-    doc.text("LAST WEEK",     COL.prev,  y + 8, { width: 70, align: "right" });
-    doc.text("CHANGE",        COL.trend, y + 8, { width: CW - (COL.trend - L) - 8, align: "right" });
+    doc.text("METRIC",    COL.label, y + 8);
+    doc.text("THIS WEEK", COL.curr,  y + 8, { width: 70, align: "right" });
+    doc.text("LAST WEEK", COL.prev,  y + 8, { width: 70, align: "right" });
+    doc.text("CHANGE",    COL.trend, y + 8, { width: CW - (COL.trend - L) - 8, align: "right" });
     y += 24;
 
-    // ── KPI row helper ───────────────────────────────────────────────────────
     const ROW_H = 42;
     let shade = false;
 
     const kpiRow = (section, label, currVal, prevVal) => {
       if (section) {
-        // Section divider
         y += 6;
         doc.rect(L, y, CW, 20).fill(BLUE);
         doc.font("Helvetica-Bold").fontSize(8).fillColor(WHITE)
@@ -183,47 +231,37 @@ function generatePDF({ curr, prev }, filePath) {
 
       const { text: tText, color: tColor } = trendLabel(currVal, prevVal);
 
-      // Label
       doc.font("Helvetica").fontSize(11).fillColor(DARK)
          .text(label, COL.label, y + 14, { width: 200 });
-
-      // Current value (big)
       doc.font("Helvetica-Bold").fontSize(16).fillColor(BLUE)
          .text(currVal.toLocaleString(), COL.curr, y + 12, { width: 70, align: "right" });
-
-      // Previous value (small grey)
       doc.font("Helvetica").fontSize(11).fillColor(MID)
          .text(prevVal.toLocaleString(), COL.prev, y + 14, { width: 70, align: "right" });
-
-      // Trend
       doc.font("Helvetica-Bold").fontSize(10).fillColor(tColor)
          .text(tText, COL.trend, y + 14, { width: CW - (COL.trend - L) - 8, align: "right" });
-
-      // Bottom border
       doc.moveTo(L, y + ROW_H).lineTo(R, y + ROW_H).strokeColor(LINE).lineWidth(0.5).stroke();
       y += ROW_H;
     };
 
-    // ── Rows ─────────────────────────────────────────────────────────────────
-    kpiRow("Website Traffic", "Page Views",          curr.pageviews,       prev.pageviews);
-    kpiRow(null,              "Unique Visitors",      curr.uniqueVisitors,  prev.uniqueVisitors);
-    kpiRow("Registrations",   "New Sign-ups",         curr.registrations,   prev.registrations);
-    kpiRow("Content",         "Cottages Created",     curr.contentCreated,  prev.contentCreated);
-    kpiRow("Activation",      "Payment Card Added",   curr.paymentCardAdded,prev.paymentCardAdded);
-    kpiRow(null,              "Went Live",            curr.wentLive,        prev.wentLive);
-    kpiRow("Bookings",        "Successful Bookings",  curr.bookings,        prev.bookings);
+    kpiRow("Website Traffic", "Page Views",          curr.pageviews,        prev.pageviews);
+    kpiRow(null,              "Unique Visitors",      curr.uniqueVisitors,   prev.uniqueVisitors);
+    kpiRow("Registrations",   "New Sign-ups",         curr.registrations,    prev.registrations);
+    kpiRow("Content",         "Cottages Created",     curr.contentCreated,   prev.contentCreated);
+    kpiRow("Activation",      "Payment Card Added",   curr.paymentCardAdded, prev.paymentCardAdded);
+    kpiRow(null,              "Went Live",             curr.wentLive,         prev.wentLive);
+    kpiRow("Bookings",        "Successful Bookings",  curr.bookings,         prev.bookings);
 
-    // ── Summary box ──────────────────────────────────────────────────────────
+    // Summary box
     y += 16;
     doc.rect(L, y, CW, 52).fill("#eff6ff").stroke(LINE);
     doc.font("Helvetica-Bold").fontSize(9).fillColor(BLUE)
        .text("WEEK SUMMARY", L + 12, y + 10);
 
     const summaryItems = [
-      { label: "Traffic",       val: curr.pageviews },
-      { label: "Sign-ups",      val: curr.registrations },
-      { label: "New Listings",  val: curr.contentCreated },
-      { label: "Bookings",      val: curr.bookings },
+      { label: "Traffic",      val: curr.pageviews },
+      { label: "Sign-ups",     val: curr.registrations },
+      { label: "New Listings", val: curr.contentCreated },
+      { label: "Bookings",     val: curr.bookings },
     ];
     const colW = CW / summaryItems.length;
     summaryItems.forEach((item, i) => {
@@ -234,13 +272,49 @@ function generatePDF({ curr, prev }, filePath) {
          .text(item.label, sx, y + 41, { width: colW, align: "center" });
     });
 
-    // ── Footer ───────────────────────────────────────────────────────────────
-    const footerY = doc.page.height - 36;
-    doc.rect(0, footerY - 4, PW, 40).fill("#f1f5f9");
+    // Footer page 1
+    const footerY1 = doc.page.height - 36;
+    doc.rect(0, footerY1 - 4, PW, 40).fill("#f1f5f9");
     doc.font("Helvetica").fontSize(8).fillColor(MID)
        .text(
          `Generated ${formatDate(now)}  \u2022  Data: PostHog  \u2022  cottage-booking.com`,
-         L, footerY + 4, { width: CW, align: "center" }
+         L, footerY1 + 4, { width: CW, align: "center" }
+       );
+
+    // ── PAGE 2: Charts ───────────────────────────────────────────────────────
+
+    doc.addPage();
+
+    // Header
+    doc.rect(0, 0, PW, 100).fill(BLUE);
+    doc.rect(0, 100, PW, 4).fill("#1e40af");
+    doc.fillColor(WHITE).font("Helvetica-Bold").fontSize(22)
+       .text("Cottage-Booking.com", L, 26);
+    doc.font("Helvetica").fontSize(11).fillColor("#bfdbfe")
+       .text(`Weekly KPI Report  \u2022  Charts  \u2022  ${formatDate(weekAgo)} \u2013 ${formatDate(now)}`, L, 56);
+
+    // 2-column chart grid
+    const chartW = (CW - 16) / 2;
+    const chartH = Math.round(chartW * (300 / 480));
+    const rowH   = chartH + 16;
+    let cy = 116;
+
+    chartBuffers.forEach((buf, i) => {
+      const col  = i % 2;
+      if (col === 0 && i !== 0) cy += rowH;
+      const cx = (i === chartBuffers.length - 1 && chartBuffers.length % 2 !== 0)
+        ? L + (CW - chartW) / 2          // center last chart if odd count
+        : L + col * (chartW + 16);
+      doc.image(buf, cx, cy, { width: chartW, height: chartH });
+    });
+
+    // Footer page 2
+    const footerY2 = doc.page.height - 36;
+    doc.rect(0, footerY2 - 4, PW, 40).fill("#f1f5f9");
+    doc.font("Helvetica").fontSize(8).fillColor(MID)
+       .text(
+         `Generated ${formatDate(now)}  \u2022  Data: PostHog  \u2022  cottage-booking.com`,
+         L, footerY2 + 4, { width: CW, align: "center" }
        );
 
     doc.end();
@@ -253,7 +327,7 @@ function generatePDF({ curr, prev }, filePath) {
 
 function trendBadge(curr, prev) {
   const { pct, up } = delta(curr, prev);
-  if (up === null) return `<span style="color:#9ca3af;font-size:11px">–</span>`;
+  if (up === null) return `<span style="color:#9ca3af;font-size:11px">\u2013</span>`;
   if (pct === null) return `<span style="color:#16a34a;font-size:11px">New</span>`;
   const arrow = up ? "&#9650;" : "&#9660;";
   const color = up ? "#16a34a" : "#dc2626";
@@ -266,7 +340,7 @@ async function sendEmail({ curr, prev }, pdfPath) {
     auth: { user: GMAIL_USER, pass: GMAIL_PASSWORD },
   });
 
-  const now = new Date();
+  const now     = new Date();
   const weekAgo = new Date(now - 7 * 24 * 60 * 60 * 1000);
 
   const row = (label, currVal, prevVal, shade) => `
@@ -299,17 +373,17 @@ async function sendEmail({ curr, prev }, pdfPath) {
             <th style="padding:10px 16px;text-align:right;font-size:11px;color:#64748b;font-weight:600">CHANGE</th>
           </tr>
           ${section("Website Traffic")}
-          ${row("Page Views",         curr.pageviews,        prev.pageviews,        false)}
-          ${row("Unique Visitors",    curr.uniqueVisitors,   prev.uniqueVisitors,   true)}
+          ${row("Page Views",          curr.pageviews,        prev.pageviews,        false)}
+          ${row("Unique Visitors",     curr.uniqueVisitors,   prev.uniqueVisitors,   true)}
           ${section("Registrations")}
-          ${row("New Sign-ups",       curr.registrations,    prev.registrations,    false)}
+          ${row("New Sign-ups",        curr.registrations,    prev.registrations,    false)}
           ${section("Content")}
-          ${row("Cottages Created",   curr.contentCreated,   prev.contentCreated,   false)}
+          ${row("Cottages Created",    curr.contentCreated,   prev.contentCreated,   false)}
           ${section("Activation")}
-          ${row("Payment Card Added", curr.paymentCardAdded, prev.paymentCardAdded, false)}
-          ${row("Went Live",          curr.wentLive,         prev.wentLive,         true)}
+          ${row("Payment Card Added",  curr.paymentCardAdded, prev.paymentCardAdded, false)}
+          ${row("Went Live",           curr.wentLive,         prev.wentLive,         true)}
           ${section("Bookings")}
-          ${row("Successful Bookings",curr.bookings,         prev.bookings,         false)}
+          ${row("Successful Bookings", curr.bookings,         prev.bookings,         false)}
         </table>
       </div>
       <div style="background:#f8fafc;padding:16px 32px;border-top:1px solid #e5e7eb;text-align:center">
