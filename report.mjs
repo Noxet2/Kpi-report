@@ -1,13 +1,10 @@
 import axios from "axios";
 import PDFDocument from "pdfkit";
 import nodemailer from "nodemailer";
-import { createWriteStream, writeFileSync, unlinkSync } from "fs";
+import { createWriteStream } from "fs";
 import { unlink } from "fs/promises";
 import { fileURLToPath } from "url";
 import path from "path";
-import { ChartJSNodeCanvas } from "chartjs-node-canvas";
-import { Chart, registerables } from "chart.js";
-Chart.register(...registerables);
 
 const POSTHOG_BASE = "https://eu.posthog.com";
 const POSTHOG_PROJECT_ID = "86171";
@@ -115,70 +112,65 @@ function trendLabel(curr, prev) {
   };
 }
 
-// ─── Charts ──────────────────────────────────────────────────────────────────
+// ─── Chart drawing (PDFKit native) ───────────────────────────────────────────
 
-const chartCanvas = new ChartJSNodeCanvas({ width: 480, height: 300, backgroundColour: "white" });
+function drawBarChart(doc, x, y, w, h, label, currVal, prevVal) {
+  const BLUE  = "#1a56db";
+  const LBLUE = "#93c5fd";
+  const DARK  = "#0f172a";
+  const MID   = "#64748b";
+  const LINE  = "#e2e8f0";
 
-function renderChart(label, currVal, prevVal) {
-  return chartCanvas.renderToBuffer({
-    type: "bar",
-    data: {
-      labels: ["This Week", "Last Week"],
-      datasets: [{
-        data: [currVal, prevVal],
-        backgroundColor: ["#1a56db", "#93c5fd"],
-        borderRadius: 6,
-        borderSkipped: false,
-      }],
-    },
-    options: {
-      plugins: {
-        legend: { display: false },
-        title: {
-          display: true,
-          text: label,
-          font: { size: 16, weight: "bold", family: "Arial" },
-          color: "#0f172a",
-          padding: { bottom: 10 },
-        },
-      },
-      scales: {
-        y: {
-          beginAtZero: true,
-          ticks: { font: { size: 11 }, color: "#64748b" },
-          grid: { color: "#e2e8f0" },
-        },
-        x: {
-          ticks: { font: { size: 12 }, color: "#374151" },
-          grid: { display: false },
-        },
-      },
-    },
-  });
+  const titleH  = 16;
+  const legendH = 24;
+  const barAreaH = h - titleH - legendH - 8;
+  const maxVal   = Math.max(currVal, prevVal, 1);
+
+  // Title
+  doc.font("Helvetica-Bold").fontSize(9).fillColor(DARK)
+     .text(label, x, y, { width: w, align: "center" });
+
+  const barTop = y + titleH + 4;
+
+  // Horizontal grid lines
+  for (let i = 0; i <= 4; i++) {
+    const gy = barTop + barAreaH * (i / 4);
+    doc.moveTo(x, gy).lineTo(x + w, gy).strokeColor(LINE).lineWidth(0.5).stroke();
+    if (i < 4) {
+      const val = Math.round(maxVal * (4 - i) / 4);
+      doc.font("Helvetica").fontSize(6).fillColor(MID)
+         .text(val.toLocaleString(), x, gy + 1, { width: 28, align: "right" });
+    }
+  }
+
+  // Bars
+  const barW   = Math.floor(w * 0.22);
+  const gapW   = Math.floor(w * 0.08);
+  const totalW = barW * 2 + gapW;
+  const barX   = x + (w - totalW) / 2;
+
+  const currBarH = Math.max(1, (currVal / maxVal) * barAreaH);
+  const prevBarH = Math.max(1, (prevVal / maxVal) * barAreaH);
+
+  doc.rect(barX,          barTop + barAreaH - currBarH, barW, currBarH).fill(BLUE);
+  doc.rect(barX + barW + gapW, barTop + barAreaH - prevBarH, barW, prevBarH).fill(LBLUE);
+
+  // Legend / values
+  const legendY = barTop + barAreaH + 4;
+  doc.font("Helvetica-Bold").fontSize(8).fillColor(BLUE)
+     .text(currVal.toLocaleString(), barX, legendY, { width: barW, align: "center" });
+  doc.font("Helvetica").fontSize(6).fillColor(MID)
+     .text("This Week", barX, legendY + 9, { width: barW, align: "center" });
+
+  doc.font("Helvetica-Bold").fontSize(8).fillColor(LBLUE)
+     .text(prevVal.toLocaleString(), barX + barW + gapW, legendY, { width: barW, align: "center" });
+  doc.font("Helvetica").fontSize(6).fillColor(MID)
+     .text("Last Week", barX + barW + gapW, legendY + 9, { width: barW, align: "center" });
 }
 
 // ─── PDF ─────────────────────────────────────────────────────────────────────
 
-async function generatePDF({ curr, prev }, filePath) {
-  // Pre-render all chart images and write to temp PNG files
-  const chartDefs = [
-    { label: "Page Views",          curr: curr.pageviews,        prev: prev.pageviews },
-    { label: "Unique Visitors",     curr: curr.uniqueVisitors,   prev: prev.uniqueVisitors },
-    { label: "New Sign-ups",        curr: curr.registrations,    prev: prev.registrations },
-    { label: "Cottages Created",    curr: curr.contentCreated,   prev: prev.contentCreated },
-    { label: "Payment Card Added",  curr: curr.paymentCardAdded, prev: prev.paymentCardAdded },
-    { label: "Went Live",           curr: curr.wentLive,         prev: prev.wentLive },
-    { label: "Successful Bookings", curr: curr.bookings,         prev: prev.bookings },
-  ];
-
-  const dir = path.dirname(fileURLToPath(import.meta.url));
-  const chartPaths = await Promise.all(chartDefs.map(async (def, i) => {
-    const buf = await renderChart(def.label, def.curr, def.prev);
-    const p = path.join(dir, `chart-${i}.png`);
-    writeFileSync(p, buf);
-    return p;
-  }));
-
+function generatePDF({ curr, prev }, filePath) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ margin: 0, size: "A4" });
     const stream = createWriteStream(filePath);
@@ -303,19 +295,29 @@ async function generatePDF({ curr, prev }, filePath) {
     doc.font("Helvetica").fontSize(11).fillColor("#bfdbfe")
        .text(`Weekly KPI Report  \u2022  Charts  \u2022  ${formatDate(weekAgo)} \u2013 ${formatDate(now)}`, L, 56);
 
-    // 2-column chart grid
+    // 2-column chart grid (drawn with PDFKit primitives)
+    const chartDefs = [
+      { label: "Page Views",          currVal: curr.pageviews,        prevVal: prev.pageviews },
+      { label: "Unique Visitors",     currVal: curr.uniqueVisitors,   prevVal: prev.uniqueVisitors },
+      { label: "New Sign-ups",        currVal: curr.registrations,    prevVal: prev.registrations },
+      { label: "Cottages Created",    currVal: curr.contentCreated,   prevVal: prev.contentCreated },
+      { label: "Payment Card Added",  currVal: curr.paymentCardAdded, prevVal: prev.paymentCardAdded },
+      { label: "Went Live",           currVal: curr.wentLive,         prevVal: prev.wentLive },
+      { label: "Successful Bookings", currVal: curr.bookings,         prevVal: prev.bookings },
+    ];
+
     const chartW = (CW - 16) / 2;
-    const chartH = Math.round(chartW * (300 / 480));
-    const rowH   = chartH + 16;
+    const chartH = 140;
+    const rowH   = chartH + 20;
     let cy = 116;
 
-    chartPaths.forEach((p, i) => {
-      const col  = i % 2;
+    chartDefs.forEach((def, i) => {
+      const col = i % 2;
       if (col === 0 && i !== 0) cy += rowH;
-      const cx = (i === chartPaths.length - 1 && chartPaths.length % 2 !== 0)
+      const cx = (i === chartDefs.length - 1 && chartDefs.length % 2 !== 0)
         ? L + (CW - chartW) / 2
         : L + col * (chartW + 16);
-      doc.image(p, cx, cy, { width: chartW, height: chartH });
+      drawBarChart(doc, cx, cy, chartW, chartH, def.label, def.currVal, def.prevVal);
     });
 
     // Footer page 2
@@ -331,9 +333,6 @@ async function generatePDF({ curr, prev }, filePath) {
     stream.on("finish", resolve);
     stream.on("error", reject);
   });
-
-  // Clean up temp chart files
-  chartPaths.forEach(p => unlinkSync(p));
 }
 
 // ─── Email ───────────────────────────────────────────────────────────────────
