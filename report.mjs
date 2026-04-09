@@ -1,7 +1,7 @@
 import axios from "axios";
 import PDFDocument from "pdfkit";
 import nodemailer from "nodemailer";
-import { createWriteStream } from "fs";
+import { createWriteStream, writeFileSync, unlinkSync } from "fs";
 import { unlink } from "fs/promises";
 import { fileURLToPath } from "url";
 import path from "path";
@@ -158,16 +158,24 @@ function renderChart(label, currVal, prevVal) {
 // ─── PDF ─────────────────────────────────────────────────────────────────────
 
 async function generatePDF({ curr, prev }, filePath) {
-  // Pre-render all chart images before opening the PDF stream
-  const chartBuffers = await Promise.all([
-    renderChart("Page Views",          curr.pageviews,        prev.pageviews),
-    renderChart("Unique Visitors",     curr.uniqueVisitors,   prev.uniqueVisitors),
-    renderChart("New Sign-ups",        curr.registrations,    prev.registrations),
-    renderChart("Cottages Created",    curr.contentCreated,   prev.contentCreated),
-    renderChart("Payment Card Added",  curr.paymentCardAdded, prev.paymentCardAdded),
-    renderChart("Went Live",           curr.wentLive,         prev.wentLive),
-    renderChart("Successful Bookings", curr.bookings,         prev.bookings),
-  ]);
+  // Pre-render all chart images and write to temp PNG files
+  const chartDefs = [
+    { label: "Page Views",          curr: curr.pageviews,        prev: prev.pageviews },
+    { label: "Unique Visitors",     curr: curr.uniqueVisitors,   prev: prev.uniqueVisitors },
+    { label: "New Sign-ups",        curr: curr.registrations,    prev: prev.registrations },
+    { label: "Cottages Created",    curr: curr.contentCreated,   prev: prev.contentCreated },
+    { label: "Payment Card Added",  curr: curr.paymentCardAdded, prev: prev.paymentCardAdded },
+    { label: "Went Live",           curr: curr.wentLive,         prev: prev.wentLive },
+    { label: "Successful Bookings", curr: curr.bookings,         prev: prev.bookings },
+  ];
+
+  const dir = path.dirname(fileURLToPath(import.meta.url));
+  const chartPaths = await Promise.all(chartDefs.map(async (def, i) => {
+    const buf = await renderChart(def.label, def.curr, def.prev);
+    const p = path.join(dir, `chart-${i}.png`);
+    writeFileSync(p, buf);
+    return p;
+  }));
 
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ margin: 0, size: "A4" });
@@ -299,13 +307,13 @@ async function generatePDF({ curr, prev }, filePath) {
     const rowH   = chartH + 16;
     let cy = 116;
 
-    chartBuffers.forEach((buf, i) => {
+    chartPaths.forEach((p, i) => {
       const col  = i % 2;
       if (col === 0 && i !== 0) cy += rowH;
-      const cx = (i === chartBuffers.length - 1 && chartBuffers.length % 2 !== 0)
-        ? L + (CW - chartW) / 2          // center last chart if odd count
+      const cx = (i === chartPaths.length - 1 && chartPaths.length % 2 !== 0)
+        ? L + (CW - chartW) / 2
         : L + col * (chartW + 16);
-      doc.image(buf, cx, cy, { width: chartW, height: chartH });
+      doc.image(p, cx, cy, { width: chartW, height: chartH });
     });
 
     // Footer page 2
@@ -321,6 +329,9 @@ async function generatePDF({ curr, prev }, filePath) {
     stream.on("finish", resolve);
     stream.on("error", reject);
   });
+
+  // Clean up temp chart files
+  chartPaths.forEach(p => unlinkSync(p));
 }
 
 // ─── Email ───────────────────────────────────────────────────────────────────
