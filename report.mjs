@@ -17,6 +17,39 @@ const LIGHTDASH_BASE    = "https://bi-cottage.jaype.tools";
 const LIGHTDASH_TOKEN   = process.env.LIGHTDASH_TOKEN;
 const LIGHTDASH_PROJECT = "75a3e11e-e80f-4fb6-b8d2-918c1be75104";
 
+// ─── Veckogränser (föregående kalender-vecka, mån–sön) ───────────────────────
+
+function getWeekBounds() {
+  const today = new Date();
+  const dow   = today.getDay() || 7; // mån=1 … sön=7
+
+  // Denna måndag (pågående vecka)
+  const thisMon = new Date(today);
+  thisMon.setDate(today.getDate() - (dow - 1));
+  thisMon.setHours(0, 0, 0, 0);
+
+  // Föregående vecka: lastMon (inkl) → thisMon (exkl)
+  const lastMon = new Date(thisMon);
+  lastMon.setDate(thisMon.getDate() - 7);
+
+  // Veckan dessförinnan: prevMon (inkl) → lastMon (exkl)
+  const prevMon = new Date(lastMon);
+  prevMon.setDate(lastMon.getDate() - 7);
+
+  // Söndag = dagen innan nästa måndag
+  const lastSun = new Date(thisMon);
+  lastSun.setDate(thisMon.getDate() - 1);
+  const prevSun = new Date(lastMon);
+  prevSun.setDate(lastMon.getDate() - 1);
+
+  const fmt = (d) => d.toISOString().slice(0, 10);
+
+  return {
+    curr: { start: lastMon, end: lastSun, startStr: fmt(lastMon), endStr: fmt(thisMon) },
+    prev: { start: prevMon, end: prevSun, startStr: fmt(prevMon), endStr: fmt(lastMon) },
+  };
+}
+
 // ─── PostHog ────────────────────────────────────────────────────────────────
 
 async function query(sql) {
@@ -28,18 +61,18 @@ async function query(sql) {
   return res.data.results;
 }
 
-function weekQuery(event, intervalStart, intervalEnd) {
+function weekQuery(event, startStr, endStr) {
   return query(`
     SELECT count()
     FROM events
     WHERE event = '${event}'
-      AND timestamp >= now() - INTERVAL ${intervalStart} DAY
-      AND timestamp < now() - INTERVAL ${intervalEnd} DAY
+      AND timestamp >= '${startStr}'
+      AND timestamp < '${endStr}'
   `);
 }
 
-// Hämtar denna vecka vs förra veckan (för sidans KPI-kort)
 async function fetchKPIs() {
+  const wb = getWeekBounds();
   const [
     trafficCurr,  trafficPrev,
     signupsCurr,  signupsPrev,
@@ -52,26 +85,25 @@ async function fetchKPIs() {
     query(`
       SELECT count() AS pageviews, count(DISTINCT distinct_id) AS unique_visitors
       FROM events WHERE event = '$pageview'
-        AND timestamp >= now() - INTERVAL 7 DAY
+        AND timestamp >= '${wb.curr.startStr}' AND timestamp < '${wb.curr.endStr}'
     `),
     query(`
       SELECT count() AS pageviews, count(DISTINCT distinct_id) AS unique_visitors
       FROM events WHERE event = '$pageview'
-        AND timestamp >= now() - INTERVAL 14 DAY
-        AND timestamp < now() - INTERVAL 7 DAY
+        AND timestamp >= '${wb.prev.startStr}' AND timestamp < '${wb.prev.endStr}'
     `),
-    weekQuery("server_platform_signup_success",              7,  0),
-    weekQuery("server_platform_signup_success",              14, 7),
-    weekQuery("email_verification_completed",                7,  0),
-    weekQuery("email_verification_completed",                14, 7),
-    weekQuery("server_setup_setup_step_completed_1",         7,  0),
-    weekQuery("server_setup_setup_step_completed_1",         14, 7),
-    weekQuery("admin_billing_payment_method_added_success",  7,  0),
-    weekQuery("admin_billing_payment_method_added_success",  14, 7),
-    weekQuery("server_cottage_live_status_changed",          7,  0),
-    weekQuery("server_cottage_live_status_changed",          14, 7),
-    weekQuery("booking_payment_success",                     7,  0),
-    weekQuery("booking_payment_success",                     14, 7),
+    weekQuery("server_platform_signup_success",             wb.curr.startStr, wb.curr.endStr),
+    weekQuery("server_platform_signup_success",             wb.prev.startStr, wb.prev.endStr),
+    weekQuery("email_verification_completed",               wb.curr.startStr, wb.curr.endStr),
+    weekQuery("email_verification_completed",               wb.prev.startStr, wb.prev.endStr),
+    weekQuery("server_setup_setup_step_completed_1",        wb.curr.startStr, wb.curr.endStr),
+    weekQuery("server_setup_setup_step_completed_1",        wb.prev.startStr, wb.prev.endStr),
+    weekQuery("admin_billing_payment_method_added_success", wb.curr.startStr, wb.curr.endStr),
+    weekQuery("admin_billing_payment_method_added_success", wb.prev.startStr, wb.prev.endStr),
+    weekQuery("server_cottage_live_status_changed",         wb.curr.startStr, wb.curr.endStr),
+    weekQuery("server_cottage_live_status_changed",         wb.prev.startStr, wb.prev.endStr),
+    weekQuery("booking_payment_success",                    wb.curr.startStr, wb.curr.endStr),
+    weekQuery("booking_payment_success",                    wb.prev.startStr, wb.prev.endStr),
   ]);
 
   const signC = Number(signupsCurr[0]?.[0]  ?? 0);
@@ -106,13 +138,13 @@ async function fetchKPIs() {
   return { curr, prev };
 }
 
-// Hämtar topp-sidor för landing page-sektion i e-post
 async function fetchLandingPages() {
+  const wb = getWeekBounds();
   return query(`
     SELECT properties.$pathname AS path, count() AS cnt
     FROM events
     WHERE event = '$pageview'
-      AND timestamp >= now() - INTERVAL 7 DAY
+      AND timestamp >= '${wb.curr.startStr}' AND timestamp < '${wb.curr.endStr}'
     GROUP BY path
     ORDER BY cnt DESC
     LIMIT 8
@@ -388,9 +420,11 @@ function generatePDF({ curr, prev, history }, filePath) {
     const stream = createWriteStream(filePath);
     doc.pipe(stream);
 
+    const wb          = getWeekBounds();
     const now         = new Date();
-    const weekAgo     = new Date(now - 7  * 24 * 60 * 60 * 1000);
-    const twoWeeksAgo = new Date(now - 14 * 24 * 60 * 60 * 1000);
+    const weekAgo     = wb.curr.start;   // föregående måndag
+    const weekEnd     = wb.curr.end;     // föregående söndag
+    const twoWeeksAgo = wb.prev.start;   // måndagen veckan dessförinnan
 
     const PW    = doc.page.width;
     const PH    = doc.page.height;
@@ -475,7 +509,7 @@ function generatePDF({ curr, prev, history }, filePath) {
     doc.font("Helvetica-Bold").fontSize(20).fillColor(WHITE).text("Cottage-Booking.com", L, 22);
     doc.font("Helvetica").fontSize(10).fillColor(MUTED).text("Veckorapport KPI", L, 48);
     doc.font("Helvetica-Bold").fontSize(9).fillColor(WHITE)
-       .text(`${formatDate(weekAgo)} \u2013 ${formatDate(now)}`, L, 22, { width: CW, align: "right" });
+       .text(`${formatDate(weekAgo)} \u2013 ${formatDate(weekEnd)}`, L, 22, { width: CW, align: "right" });
     doc.font("Helvetica").fontSize(8).fillColor(MUTED)
        .text(`F\u00f6reg. vecka: ${formatDate(twoWeeksAgo)} \u2013 ${formatDate(weekAgo)}`, L, 38, { width: CW, align: "right" });
 
@@ -541,7 +575,7 @@ function generatePDF({ curr, prev, history }, filePath) {
     doc.font("Helvetica-Bold").fontSize(20).fillColor(WHITE).text("Cottage-Booking.com", L, 22);
     doc.font("Helvetica").fontSize(10).fillColor(MUTED).text("Veckorapport KPI \u2013 Trender (8 veckor)", L, 48);
     doc.font("Helvetica-Bold").fontSize(9).fillColor(WHITE)
-       .text(`${formatDate(weekAgo)} \u2013 ${formatDate(now)}`, L, 22, { width: CW, align: "right" });
+       .text(`${formatDate(weekAgo)} \u2013 ${formatDate(weekEnd)}`, L, 22, { width: CW, align: "right" });
 
     let cy = 101;
     cy = sectionBand("Veckovisa trender \u2013 faktiskt v\u00e4rde \u2014 och genomsnitt per vecka", cy);
