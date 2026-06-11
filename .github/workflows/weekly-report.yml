@@ -21,4 +21,5 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
           REPORT_RECIPIENT: ${{ secrets.REPORT_RECIPIENT }}
+          LIGHTDASH_TOKEN: ${{ secrets.LIGHTDASH_TOKEN }}
         run: node report.mjs
