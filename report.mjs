@@ -98,10 +98,32 @@ async function fetchKPIs() {
     weekQuery("email_verification_completed",               wb.prev.startStr, wb.prev.endStr),
     weekQuery("server_setup_setup_step_completed_1",        wb.curr.startStr, wb.curr.endStr),
     weekQuery("server_setup_setup_step_completed_1",        wb.prev.startStr, wb.prev.endStr),
-    weekQuery("admin_billing_payment_method_added_success", wb.curr.startStr, wb.curr.endStr),
-    weekQuery("admin_billing_payment_method_added_success", wb.prev.startStr, wb.prev.endStr),
-    weekQuery("server_cottage_live_status_changed",         wb.curr.startStr, wb.curr.endStr),
-    weekQuery("server_cottage_live_status_changed",         wb.prev.startStr, wb.prev.endStr),
+    query(`
+      SELECT count(DISTINCT JSONExtractString(properties, '$group_0'))
+      FROM events
+      WHERE event = 'admin_billing_payment_method_added_success'
+        AND timestamp >= '${wb.curr.startStr}' AND timestamp < '${wb.curr.endStr}'
+    `),
+    query(`
+      SELECT count(DISTINCT JSONExtractString(properties, '$group_0'))
+      FROM events
+      WHERE event = 'admin_billing_payment_method_added_success'
+        AND timestamp >= '${wb.prev.startStr}' AND timestamp < '${wb.prev.endStr}'
+    `),
+    query(`
+      SELECT count(DISTINCT JSONExtractString(properties, 'cottage_id'))
+      FROM events
+      WHERE event = 'server_cottage_live_status_changed'
+        AND JSONExtractString(properties, 'action') = 'went_live'
+        AND timestamp >= '${wb.curr.startStr}' AND timestamp < '${wb.curr.endStr}'
+    `),
+    query(`
+      SELECT count(DISTINCT JSONExtractString(properties, 'cottage_id'))
+      FROM events
+      WHERE event = 'server_cottage_live_status_changed'
+        AND JSONExtractString(properties, 'action') = 'went_live'
+        AND timestamp >= '${wb.prev.startStr}' AND timestamp < '${wb.prev.endStr}'
+    `),
     weekQuery("booking_payment_success",                    wb.curr.startStr, wb.curr.endStr),
     weekQuery("booking_payment_success",                    wb.prev.startStr, wb.prev.endStr),
   ]);
@@ -236,8 +258,21 @@ async function fetchHistory() {
     weeklyQuery("server_platform_signup_success"),
     weeklyQuery("email_verification_completed"),
     weeklyQuery("server_setup_setup_step_completed_1"),
-    weeklyQuery("admin_billing_payment_method_added_success"),
-    weeklyQuery("server_cottage_live_status_changed"),
+    query(`
+      SELECT toMonday(timestamp) AS week, count(DISTINCT JSONExtractString(properties, '$group_0')) AS cnt
+      FROM events
+      WHERE event = 'admin_billing_payment_method_added_success'
+        AND timestamp >= now() - INTERVAL 56 DAY
+      GROUP BY week ORDER BY week
+    `),
+    query(`
+      SELECT toMonday(timestamp) AS week, count(DISTINCT JSONExtractString(properties, 'cottage_id')) AS cnt
+      FROM events
+      WHERE event = 'server_cottage_live_status_changed'
+        AND JSONExtractString(properties, 'action') = 'went_live'
+        AND timestamp >= now() - INTERVAL 56 DAY
+      GROUP BY week ORDER BY week
+    `),
     weeklyQuery("booking_payment_success"),
   ]);
 
