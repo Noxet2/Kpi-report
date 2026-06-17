@@ -20,27 +20,15 @@ const LIGHTDASH_PROJECT = "75a3e11e-e80f-4fb6-b8d2-918c1be75104";
 // ─── Veckogränser (föregående kalender-vecka, mån–sön) ───────────────────────
 
 function getWeekBounds() {
-  const today = new Date();
-  const dow   = today.getDay() || 7; // mån=1 … sön=7
+  const now    = new Date();
+  const dow    = now.getUTCDay() || 7; // mån=1 … sön=7 (UTC)
 
-  // Denna måndag (pågående vecka)
-  const thisMon = new Date(today);
-  thisMon.setDate(today.getDate() - (dow - 1));
-  thisMon.setHours(0, 0, 0, 0);
-
-  // Föregående vecka: lastMon (inkl) → thisMon (exkl)
-  const lastMon = new Date(thisMon);
-  lastMon.setDate(thisMon.getDate() - 7);
-
-  // Veckan dessförinnan: prevMon (inkl) → lastMon (exkl)
-  const prevMon = new Date(lastMon);
-  prevMon.setDate(lastMon.getDate() - 7);
-
-  // Söndag = dagen innan nästa måndag
-  const lastSun = new Date(thisMon);
-  lastSun.setDate(thisMon.getDate() - 1);
-  const prevSun = new Date(lastMon);
-  prevSun.setDate(lastMon.getDate() - 1);
+  // Allt beräknas i UTC för att matcha PostHogs timestamp-lagring
+  const thisMon = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - (dow - 1)));
+  const lastMon = new Date(thisMon.getTime() - 7 * 86400000);
+  const prevMon = new Date(lastMon.getTime() - 7 * 86400000);
+  const lastSun = new Date(thisMon.getTime() - 86400000);
+  const prevSun = new Date(lastMon.getTime() - 86400000);
 
   const fmt = (d) => d.toISOString().slice(0, 10);
 
@@ -276,21 +264,17 @@ async function fetchHistory() {
     weeklyQuery("booking_payment_success"),
   ]);
 
-  // Generera 8 måndagar bakåt från denna måndag
-  const today   = new Date();
-  const dow     = today.getDay() || 7; // mån=1 … sön=7
-  const thisMon = new Date(today);
-  thisMon.setDate(today.getDate() - (dow - 1));
-  thisMon.setHours(0, 0, 0, 0);
+  // Generera 7 avslutade måndagar bakåt i UTC (matchar PostHogs toMonday)
+  const now    = new Date();
+  const dow    = now.getUTCDay() || 7;
+  const thisMon = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - (dow - 1)));
 
   const weekStarts = [];
-  for (let i = 7; i >= 1; i--) {   // 7 avslutade veckor, exkl. pågående vecka
-    const d = new Date(thisMon);
-    d.setDate(d.getDate() - i * 7);
-    weekStarts.push(d);
+  for (let i = 7; i >= 1; i--) {
+    weekStarts.push(new Date(thisMon.getTime() - i * 7 * 86400000));
   }
 
-  const dKey  = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  const dKey  = (d) => d.toISOString().slice(0, 10);  // UTC-datum (matchar PostHog)
   const toKey = (v)  => String(v).slice(0, 10);
 
   const fillSeries = (rows, vi = 1) => {
